@@ -1,17 +1,9 @@
-# ============================================
+﻿# ============================================
 # VeggieOps AI — Docker Compose
-# ============================================
-# This file defines our local development stack.
-# Run with: docker compose up -d
-# Stop with: docker compose down
-# View logs: docker compose logs -f
 # ============================================
 
 services:
 
-  # ----------------------------------------------------
-  # PostgreSQL Database
-  # ----------------------------------------------------
   db:
     image: postgres:16-alpine
     container_name: veggie-db
@@ -32,9 +24,6 @@ services:
     networks:
       - veggie-net
 
-  # ----------------------------------------------------
-  # Adminer — Web-based Database UI
-  # ----------------------------------------------------
   adminer:
     image: adminer:latest
     container_name: veggie-adminer
@@ -50,12 +39,9 @@ services:
     networks:
       - veggie-net
 
-  # ----------------------------------------------------
-  # Backend — FastAPI Application
-  # ----------------------------------------------------
   backend:
     build:
-      context: ../backend       # Path to backend folder (relative to this file)
+      context: ../backend
       dockerfile: Dockerfile
     container_name: veggie-backend
     restart: unless-stopped
@@ -65,23 +51,38 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       ENVIRONMENT: development
     volumes:
-      - ../backend/app:/app/app    # Hot reload: code changes sync into container
+      - ../backend/app:/app/app
     depends_on:
       db:
         condition: service_healthy
     networks:
       - veggie-net
 
-# ============================================
-# Named volumes — data survives container restarts
-# ============================================
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: veggie-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ../frontend/app:/app/app
+      - ../frontend/package.json:/app/package.json
+      - ../frontend/next.config.js:/app/next.config.js
+      - ../frontend/tsconfig.json:/app/tsconfig.json
+    depends_on:
+      - backend
+    networks:
+      - veggie-net
+
 volumes:
   veggie_postgres_data:
     name: veggie_postgres_data
 
-# ============================================
-# Custom network — services find each other by name
-# ============================================
 networks:
   veggie-net:
     name: veggie-net
