@@ -14,7 +14,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import our Base and all models
+# add your model's MetaData object here
+# for 'autogenerate' support
+# from myapp import mymodel
+# target_metadata = mymodel.Base.metadata
 from app.db.base import Base
 from app.models import (
     Farmer, Customer, Employee,
@@ -26,10 +29,7 @@ from app.models import (
     ProcessingEvent,
     AIQuery, AIToolCall, Forecast,
 )
-
-# Tell Alembic about our schema
 target_metadata = Base.metadata
-
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

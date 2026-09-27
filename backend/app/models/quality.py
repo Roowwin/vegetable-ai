@@ -42,7 +42,7 @@ class QualityTest(Base):
     __tablename__ = "quality_tests"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), nullable=False, index=True)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), nullable=True, index=True)
     tester_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
     grade_id: Mapped[int] = mapped_column(ForeignKey("grades.id"), nullable=False)
     
