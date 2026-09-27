@@ -1,0 +1,70 @@
+# ============================================
+# VeggieOps AI — Docker Compose
+# ============================================
+# This file defines our local development stack.
+# Run with: docker compose up -d
+# Stop with: docker compose down
+# View logs: docker compose logs -f
+# ============================================
+
+# All services share this network so they can talk by name.
+# Inside containers: http://db:5432, http://adminer:8080
+# From your host:   http://localhost:5432, http://localhost:8080
+
+services:
+
+  # ----------------------------------------------------
+  # PostgreSQL Database
+  # ----------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: veggie-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - veggie_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - veggie-net
+
+  # ----------------------------------------------------
+  # Adminer — Web-based Database UI
+  # ----------------------------------------------------
+  adminer:
+    image: adminer:latest
+    container_name: veggie-adminer
+    restart: unless-stopped
+    ports:
+      - "${ADMINER_PORT:-8080}:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+      ADMINER_DESIGN: pepa-linha-dark
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - veggie-net
+
+# ============================================
+# Named volumes — data survives container restarts
+# ============================================
+volumes:
+  veggie_postgres_data:
+    name: veggie_postgres_data
+
+# ============================================
+# Custom network — services find each other by name
+# ============================================
+networks:
+  veggie-net:
+    name: veggie-net
+    driver: bridge
