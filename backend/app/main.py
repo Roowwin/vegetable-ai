@@ -1,89 +1,83 @@
 """
-VeggieOps AI — Backend Application Entry Point
+VeggieOps AI - Backend Application Entry Point
 ==============================================
-This is the FastAPI application that powers our backend.
 """
 
 from datetime import datetime, timezone
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
-# --------------------------------------------
-# Application setup
-# --------------------------------------------
+from app.db.session import get_db
 
 app = FastAPI(
     title="VeggieOps AI API",
     description="AI-powered backend for vegetable resale businesses",
-    version="0.1.0",
-    docs_url="/docs",        # Interactive API docs (Swagger UI)
-    redoc_url="/redoc",      # Alternative API docs
+    version="0.3.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
-
-# --------------------------------------------
-# CORS Configuration
-# --------------------------------------------
-# CORS = Cross-Origin Resource Sharing
-# Without this, browsers block our frontend (localhost:3000)
-# from calling our backend (localhost:8000).
-# In production, replace "*" with your actual frontend domain.
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # Allow all origins in development
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],          # Allow all HTTP methods
-    allow_headers=["*"],          # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
-# --------------------------------------------
-# Health Check Endpoint
-# --------------------------------------------
-# Used by Docker healthcheck and frontend connection test.
-
 @app.get("/api/health", tags=["system"])
 async def health_check() -> dict:
-    """
-    Check that the API is running.
-    
-    Returns basic system information including timestamp.
-    """
     return {
         "status": "healthy",
         "service": "VeggieOps AI",
-        "version": "0.1.0",
+        "version": "0.3.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "milestone": "2 (Part B — Backend Hello World)",
+        "milestone": "3 (Part A - Database Connection)",
     }
 
 
-# --------------------------------------------
-# Root Endpoint
-# --------------------------------------------
-# A friendly landing page for anyone hitting the API directly.
-
 @app.get("/", tags=["system"])
 async def root() -> dict:
-    """
-    Welcome endpoint. Points users to the interactive API docs.
-    """
     return {
         "message": "Welcome to VeggieOps AI API",
         "docs": "/docs",
         "health": "/api/health",
+        "db_test": "/api/db-test",
     }
-@app.get("/api/hello/{name}", tags=["demo"])
-async def hello(name: str) -> dict:
-    """
-    A demo endpoint to test hot reload.
-    """
-    return {"message": f"Hello, {name}! Welcome to VeggieOps AI."}
 
 
-# --------------------------------------------
-# Database Connection Test (Coming in Milestone 3)
-# --------------------------------------------
-# For now, we just verify the API runs.
-# In Milestone 3, we'll add a /api/db-test endpoint that
-# actually queries Postgres to prove the connection works.
+@app.get("/api/db-test", tags=["system"])
+async def db_test(db: Session = Depends(get_db)) -> dict:
+    """
+    Verify the backend can connect to PostgreSQL.
+    """
+    try:
+        version_result = db.execute(text("SELECT version()")).fetchone()
+        version = version_result[0] if version_result else "unknown"
+
+        db_result = db.execute(text("SELECT current_database()")).fetchone()
+        database = db_result[0] if db_result else "unknown"
+
+        # Use parameter binding to avoid quote issues
+        count_result = db.execute(
+            text("SELECT count(*) FROM information_schema.tables WHERE table_schema = :schema"),
+            {"schema": "public"}
+        ).fetchone()
+        table_count = count_result[0] if count_result else 0
+
+        return {
+            "status": "connected",
+            "database": database,
+            "version": version,
+            "tables_in_public_schema": table_count,
+            "milestone": "3 (Part A - Database Connection)",
+            "next_step": "Part B will create 22 tables",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+        }
