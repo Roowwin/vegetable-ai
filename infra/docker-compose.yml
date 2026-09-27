@@ -7,10 +7,6 @@
 # View logs: docker compose logs -f
 # ============================================
 
-# All services share this network so they can talk by name.
-# Inside containers: http://db:5432, http://adminer:8080
-# From your host:   http://localhost:5432, http://localhost:8080
-
 services:
 
   # ----------------------------------------------------
@@ -48,6 +44,28 @@ services:
     environment:
       ADMINER_DEFAULT_SERVER: db
       ADMINER_DESIGN: pepa-linha-dark
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - veggie-net
+
+  # ----------------------------------------------------
+  # Backend — FastAPI Application
+  # ----------------------------------------------------
+  backend:
+    build:
+      context: ../backend       # Path to backend folder (relative to this file)
+      dockerfile: Dockerfile
+    container_name: veggie-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      ENVIRONMENT: development
+    volumes:
+      - ../backend/app:/app/app    # Hot reload: code changes sync into container
     depends_on:
       db:
         condition: service_healthy
