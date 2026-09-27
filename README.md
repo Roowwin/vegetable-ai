@@ -161,7 +161,6 @@ The **router** decides which model handles each query. Simple questions stay che
 - ✅ **No cloud AI services** — all inference runs locally via Ollama
 - ✅ **No data leaves your machine** — Postgres + AI + code all on your hardware
 - ✅ **No subscription fees** — completely free forever after setup
-- ⚠️ **Hardware requirement** — NVIDIA GPU with 8GB+ VRAM recommended (RTX 3080 or better)
 
 ## 📚 Documentation
 
@@ -180,4 +179,3 @@ This is a learning project. Suggestions, bug reports, and educational contributi
 
 ---
 
-**Built as a serious capstone project for learning AI engineering from first principles.**
