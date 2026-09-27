@@ -1,5 +1,5 @@
 # ============================================
-# VeggieOps AI — Backend Dependencies
+# VeggieOps AI â€” Backend Dependencies
 # ============================================
 # Pin versions for reproducible builds.
 # Format: package==version
@@ -10,6 +10,7 @@ uvicorn[standard]==0.34.0
 
 # Data validation
 pydantic==2.10.4
+email-validator==2.3.0
 pydantic-settings==2.7.0
 
 # Database

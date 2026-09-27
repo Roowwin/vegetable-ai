@@ -10,15 +10,23 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.api import farmers, vegetables, lots, inventory, sales, purchase_orders, dashboard
 
+
+# --------------------------------------------
+# Application setup
+# --------------------------------------------
 app = FastAPI(
     title="VeggieOps AI API",
     description="AI-powered backend for vegetable resale businesses",
-    version="0.3.0",
+    version="0.5.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
+# --------------------------------------------
+# CORS Configuration
+# --------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,17 +36,35 @@ app.add_middleware(
 )
 
 
+# --------------------------------------------
+# API Routers (Phase 3)
+# --------------------------------------------
+app.include_router(farmers.router)
+app.include_router(vegetables.router)
+app.include_router(lots.router)
+app.include_router(inventory.router)
+app.include_router(sales.router)
+app.include_router(purchase_orders.router)
+app.include_router(dashboard.router)
+
+
+# --------------------------------------------
+# Health Check
+# --------------------------------------------
 @app.get("/api/health", tags=["system"])
 async def health_check() -> dict:
     return {
         "status": "healthy",
         "service": "VeggieOps AI",
-        "version": "0.3.0",
+        "version": "0.5.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "milestone": "3 (Part A - Database Connection)",
+        "milestone": "5 (Phase 3 - API Routes)",
     }
 
 
+# --------------------------------------------
+# Root
+# --------------------------------------------
 @app.get("/", tags=["system"])
 async def root() -> dict:
     return {
@@ -46,14 +72,19 @@ async def root() -> dict:
         "docs": "/docs",
         "health": "/api/health",
         "db_test": "/api/db-test",
+        "endpoints": {
+            "farmers": "/api/farmers",
+            "vegetables": "/api/vegetables",
+        },
     }
 
 
+# --------------------------------------------
+# Database Connection Test
+# --------------------------------------------
 @app.get("/api/db-test", tags=["system"])
 async def db_test(db: Session = Depends(get_db)) -> dict:
-    """
-    Verify the backend can connect to PostgreSQL.
-    """
+    """Verify the backend can connect to PostgreSQL."""
     try:
         version_result = db.execute(text("SELECT version()")).fetchone()
         version = version_result[0] if version_result else "unknown"
@@ -61,7 +92,6 @@ async def db_test(db: Session = Depends(get_db)) -> dict:
         db_result = db.execute(text("SELECT current_database()")).fetchone()
         database = db_result[0] if db_result else "unknown"
 
-        # Use parameter binding to avoid quote issues
         count_result = db.execute(
             text("SELECT count(*) FROM information_schema.tables WHERE table_schema = :schema"),
             {"schema": "public"}
@@ -73,11 +103,7 @@ async def db_test(db: Session = Depends(get_db)) -> dict:
             "database": database,
             "version": version,
             "tables_in_public_schema": table_count,
-            "milestone": "3 (Part A - Database Connection)",
-            "next_step": "Part B will create 22 tables",
+            "milestone": "5 (Phase 3 - API Routes)",
         }
     except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e),
-        }
+        return {"status": "error", "error": str(e)}
