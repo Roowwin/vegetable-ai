@@ -65,6 +65,11 @@ from app.schemas.purchase_order import (
 )
 
 # Dashboard
+from app.schemas.workflow import (
+    LotTransitionRequest,
+    LotTransitionResponse,
+    LotAllowedTransitions,
+)
 from app.schemas.dashboard import (
     KPISummary, TimeSeriesPoint, RevenueTimeSeries, SalesVolumeTimeSeries,
     GradeDistribution, VegetableBreakdown, SupplierPerformance,

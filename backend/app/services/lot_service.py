@@ -1,4 +1,6 @@
 """
+from __future__ import annotations
+
 Lot Service
 ===========
 The heart of the business. Tracks lots from acquisition to sale and computes
@@ -7,7 +9,7 @@ the true profit and loss for each lot.
 This is the most important service in the system.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -17,11 +19,17 @@ from app.models.people import Farmer
 from app.models.quality import Grade, QualityTest, SortResult
 from app.models.sales import SaleItem
 from app.models.costs import CostEntry, LaborRecord
+from app.models.audit import ProcessingEvent
 from app.schemas.lot import (
     LotBase, LotCreate, LotUpdate, LotRead, LotListItem,
     LotProfitLoss, CostBreakdown,
 )
+from app.schemas.workflow import LotTransitionResponse
 from app.services.base import BaseService
+from app.services.lot_workflow import (
+    LotState, validate_transition, get_event_type, get_allowed_transitions,
+    InvalidTransitionError, MissingTransitionDataError, LotEventType,
+)
 
 
 class LotService(BaseService[Lot, LotCreate, LotUpdate]):
@@ -31,6 +39,10 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
 
     def __init__(self, db: Session):
         super().__init__(db)
+
+    # ============================================
+    # CRUD + LIST METHODS
+    # ============================================
 
     def list(
         self,
@@ -50,10 +62,9 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
         if vegetable_id:
             query = query.filter(Lot.vegetable_id == vegetable_id)
         if farmer_id:
-            query = query = query.join(
-                __import__("app.models.procurement", fromlist=["PurchaseOrder"]).PurchaseOrder
-            ).filter(
-                __import__("app.models.procurement", fromlist=["PurchaseOrder"]).PurchaseOrder.farmer_id == farmer_id
+            from app.models.procurement import PurchaseOrder
+            query = query.join(PurchaseOrder, Lot.purchase_order_id == PurchaseOrder.id).filter(
+                PurchaseOrder.farmer_id == farmer_id
             )
         if min_acquired_at:
             query = query.filter(Lot.acquired_at >= min_acquired_at)
@@ -68,11 +79,13 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
         """Get a lot by its human-readable code (e.g., 'L-2024-00001')."""
         return self.db.query(Lot).filter(Lot.lot_code == lot_code).first()
 
+    # ============================================
+    # P&L COMPUTATION (THE KILLER QUERY)
+    # ============================================
+
     def compute_lot_pnl(self, lot_code: str) -> LotProfitLoss | None:
         """
         Compute detailed profit & loss for a single lot.
-
-        This is the KILLER QUERY - answers "How much money did Lot L001 really make?"
 
         Breakdown includes:
         - Acquisition, transport, processing, storage, selling, waste costs
@@ -145,9 +158,8 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
         waste_recovery_value = Decimal("0")
         if sort_result:
             waste_kg = (sort_result.damaged_kg or Decimal("0")) + (sort_result.recycle_kg or Decimal("0"))
-            # Recovery: recycled items have minimal value, damaged items are a total loss
             if sort_result.recycle_kg and sort_result.recycle_kg > 0:
-                waste_recovery_value = sort_result.recycle_kg * Decimal("0.05")  # $0.05/kg recovery
+                waste_recovery_value = sort_result.recycle_kg * Decimal("0.05")
 
         waste_pct = (
             (waste_kg / lot.total_weight_kg * 100) if lot.total_weight_kg > 0 else Decimal("0")
@@ -159,8 +171,6 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
             (gross_profit / total_revenue * 100) if total_revenue > 0 else Decimal("0")
         )
 
-        # Allocated overhead: lot's share of monthly overhead
-        # For simplicity, we use 10% of acquisition cost as estimated overhead
         allocated_overhead = costs.acquisition * Decimal("0.10")
         net_profit = gross_profit - allocated_overhead
         net_margin_pct = (
@@ -215,3 +225,197 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
             acquired_at=lot.acquired_at,
             closed_at=None,
         )
+
+    # ============================================
+    # WORKFLOW METHODS (Milestone 6 Phase B)
+    # ============================================
+
+    def transition_lot(
+        self,
+        lot_code: str,
+        new_status: str,
+        employee_id: int,
+        notes: str | None = None,
+        grade_id: int | None = None,
+        location: str | None = None,
+    ) -> LotTransitionResponse:
+        """
+        Transition a lot to a new status with validation and audit logging.
+
+        Steps:
+        1. Look up the lot
+        2. Validate the transition (uses state machine)
+        3. Apply the transition (update lot.status)
+        4. Create a ProcessingEvent record (audit log)
+        5. Handle side effects (create inventory, log grade, etc.)
+        6. Commit atomically
+        7. Return the transition details
+
+        Raises:
+            ValueError: if lot not found or transition invalid
+        """
+        # Step 1: Find the lot
+        lot = self.get_by_code(lot_code)
+        if not lot:
+            raise ValueError(f"Lot {lot_code} not found")
+
+        # Step 2: Validate the transition (raises on invalid)
+        transition_data = {
+            "grade_id": grade_id,
+            "location": location,
+        }
+        try:
+            old_state, new_state = validate_transition(
+                current=lot.status,
+                new=new_status,
+                transition_data=transition_data,
+            )
+        except (InvalidTransitionError, MissingTransitionDataError) as e:
+            raise ValueError(str(e)) from e
+
+        # Step 3: Apply the transition
+        previous_status = lot.status
+        lot.status = new_state
+
+        # Step 4: Create the processing event (audit log)
+        event_type = get_event_type(previous_status, new_state) or LotEventType.LOT_REGISTERED
+        event = ProcessingEvent(
+            event_type=event_type.value,
+            lot_id=lot.id,
+            asset_id=None,
+            sale_id=None,
+            employee_id=employee_id,
+            event_data={
+                "previous_status": previous_status,
+                "new_status": new_status,
+            },
+            notes=notes,
+        )
+        self.db.add(event)
+
+        # Step 5: Handle side effects based on the transition
+        self._handle_transition_side_effects(lot, new_state, grade_id, location, employee_id)
+
+        # Step 6: Commit atomically
+        self.db.commit()
+        self.db.refresh(lot)
+
+        # Step 7: Return response
+        return LotTransitionResponse(
+            lot_code=lot.lot_code,
+            previous_status=previous_status,
+            new_status=new_status,
+            event_type=event_type.value,
+            transitioned_at=datetime.now(timezone.utc).isoformat(),
+            transitioned_by_employee_id=employee_id,
+        )
+
+    def _handle_transition_side_effects(
+        self,
+        lot: Lot,
+        new_state: LotState,
+        grade_id: int | None,
+        location: str | None,
+        employee_id: int,
+    ) -> None:
+        """
+        Handle side effects of a status transition.
+
+        - On Graded: record the grade assignment as a QualityTest
+        - On InInventory: create Inventory record + initial transaction
+        - On PutOnSale: ensure pricing exists (placeholder)
+        """
+        # When Graded: record the grade assignment
+        if new_state == LotState.GRADED and grade_id:
+            grade = self.db.query(Grade).filter(Grade.id == grade_id).first()
+            if grade:
+                test = QualityTest(
+                    asset_id=None,
+                    tester_id=employee_id,
+                    grade_id=grade_id,
+                    tested_at=datetime.now(timezone.utc),
+                    parameters={
+                        "lot_id": str(lot.id),
+                        "transition_grade": grade.code,
+                    },
+                    comments=f"Grade assigned during workflow transition",
+                    superseded_by_id=None,
+                )
+                self.db.add(test)
+
+        # When InInventory: create Inventory record + initial transaction
+        elif new_state == LotState.IN_INVENTORY:
+            existing_inv = (
+                self.db.query(Inventory)
+                .filter(Inventory.location == f"Lot:{lot.lot_code}")
+                .first()
+            )
+            if not existing_inv:
+                inv_location = location or "Main Shop"
+                inv = Inventory(
+                    asset_id=None,
+                    location=inv_location,
+                    quantity_kg=lot.total_weight_kg,
+                    quantity_units=None,
+                    available_from=datetime.now(timezone.utc),
+                    expires_at=None,
+                    is_available=True,
+                )
+                self.db.add(inv)
+                self.db.flush()
+
+                txn = InventoryTransaction(
+                    inventory_id=inv.id,
+                    txn_type="Received",
+                    qty_change_kg=lot.total_weight_kg,
+                    qty_change_units=None,
+                    reference_type="lot_arrival",
+                    reference_id=lot.id,
+                    notes=f"Initial stock from {lot.lot_code}",
+                    created_by=employee_id,
+                )
+                self.db.add(txn)
+
+        # When PutOnSale: pricing logic (placeholder for now)
+        elif new_state == LotState.ON_SALE:
+            # Pricing will be handled in Milestone 9 (Sales system)
+            pass
+
+    def get_transition_history(self, lot_code: str) -> "list[dict]":
+        """Get the full transition history for a lot (audit log)."""
+        lot = self.get_by_code(lot_code)
+        if not lot:
+            raise ValueError(f"Lot {lot_code} not found")
+
+        events = (
+            self.db.query(ProcessingEvent)
+            .filter(
+                ProcessingEvent.lot_id == lot.id,
+                ProcessingEvent.event_type.in_([
+                    "LotRegistered", "LotSkidded", "LotSorted", "LotTested",
+                    "LotGraded", "LotInventoried", "LotPutOnSale",
+                    "LotPulledFromSale", "LotPartiallySold", "LotFullySold",
+                    "LotClosed", "LotRecycled", "GradeAssigned",
+                ]),
+            )
+            .order_by(ProcessingEvent.created_at)
+            .all()
+        )
+
+        return [
+            {
+                "event_type": e.event_type,
+                "employee_id": e.employee_id,
+                "timestamp": e.created_at.isoformat() if e.created_at else None,
+                "notes": e.notes,
+                "event_data": e.event_data,
+            }
+            for e in events
+        ]
+
+    def get_allowed_transitions(self, lot_code: str) -> "list[str]":
+        """Get the list of allowed transitions from a lot's current status."""
+        lot = self.get_by_code(lot_code)
+        if not lot:
+            raise ValueError(f"Lot {lot_code} not found")
+        return get_allowed_transitions(lot.status)
