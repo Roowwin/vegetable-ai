@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.api import farmers, vegetables, lots, inventory, sales, purchase_orders, dashboard, transitions
+from app.api import farmers, vegetables, lots, inventory, sales, purchase_orders, dashboard, transitions, locations
 
 
 # --------------------------------------------
@@ -47,6 +47,7 @@ app.include_router(sales.router)
 app.include_router(purchase_orders.router)
 app.include_router(dashboard.router)
 app.include_router(transitions.router)
+app.include_router(locations.router)
 
 
 # --------------------------------------------

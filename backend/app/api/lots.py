@@ -9,6 +9,8 @@ The /pnl endpoint is what makes VeggieOps AI valuable to a shop owner.
 from datetime import datetime
 from fastapi import APIRouter, Query, status, Depends
 from typing import Annotated
+from pydantic import BaseModel, Field
+
 
 from app.api.deps import DbSession, PaginationParams, paginated_response, not_found
 from app.schemas.lot import (
@@ -113,3 +115,48 @@ async def update_lot(lot_code: str, data: LotUpdate, db: DbSession):
     # Simpler: just call update directly via the service
     updated = service.update(lot.id, data)
     return updated
+class MoveLotRequest(BaseModel):
+    """Request to move a lot to a new location."""
+    to_location_code: str = Field(description="Target location code (e.g., 'COLD_ROOM_A')")
+    employee_id: int = Field(gt=0, description="ID of employee performing the move")
+    reason: str = Field(default="Manual move", max_length=60)
+    notes: str | None = Field(default=None, max_length=500)
+@router.post("/{lot_code}/move", summary="Manually move a lot to a new location")
+async def move_lot(lot_code: str, data: MoveLotRequest, db: DbSession):
+    """
+    Manually move a lot to a new location.
+    
+    Creates a LocationHistory record and updates the lot's current_location_id.
+    Also moves all assets in the lot.
+    """
+    service = LotService(db)
+    try:
+        result = service.move_lot(
+            lot_code=lot_code,
+            to_location_code=data.to_location_code,
+            employee_id=data.employee_id,
+            reason=data.reason,
+            notes=data.notes,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "move_failed", "message": str(e)},
+        )
+
+
+@router.get("/{lot_code}/location-history", summary="Get location history for a lot")
+async def get_lot_location_history(lot_code: str, db: DbSession, limit: int = 50):
+    """Get all location movements for a lot (audit log)."""
+    service = LotService(db)
+    lot = service.get_by_code(lot_code)
+    if not lot:
+        raise not_found("Lot", lot_code)
+    history = service.get_location_history(lot_code, limit=limit)
+    return {
+        "lot_code": lot_code,
+        "current_location_id": lot.current_location_id,
+        "event_count": len(history),
+        "events": history,
+    }
