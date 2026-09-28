@@ -44,11 +44,11 @@ def estimate_complexity(query: str) -> ModelRole:
     Estimate query complexity to decide which model to use.
     
     Heuristics:
-    - Very short queries (1-3 words) → ROUTER
-    - Contains complex keywords → ADVANCED
-    - Contains simple keywords → ROUTER
-    - Multi-part questions → ADVANCED
-    - Default → GENERAL
+    - Very short queries (1-3 words) Ã¢â€ â€™ ROUTER
+    - Contains complex keywords Ã¢â€ â€™ ADVANCED
+    - Contains simple keywords Ã¢â€ â€™ ROUTER
+    - Multi-part questions Ã¢â€ â€™ ADVANCED
+    - Default Ã¢â€ â€™ GENERAL
     """
     query_lower = query.lower().strip()
     word_count = len(query_lower.split())
@@ -82,8 +82,8 @@ def estimate_complexity(query: str) -> ModelRole:
 
 # Model name mappings (Ollama model identifiers)
 MODEL_NAMES = {
-    ModelRole.ROUTER: "qwen2.5-coder:1.5b",       # Small, fast
-    ModelRole.GENERAL: "gemma3:4b",                  # Medium, capable
+    ModelRole.ROUTER: "qwen2.5:7b",                # Use only model with reliable tool support
+    ModelRole.GENERAL: "qwen2.5:7b",                # Medium, supports tool calling
     ModelRole.ADVANCED: "qwen2.5:7b",                # Large, powerful
 }
 

@@ -13,6 +13,9 @@ Each tool wraps a service method and provides:
 import json
 from typing import Any, Callable
 from dataclasses import dataclass
+from app.services.cost_service import CostService
+from app.models.inventory import Lot
+
 
 
 @dataclass
@@ -371,3 +374,123 @@ def call_tool(name: str, arguments: dict) -> Any:
         return tool.function(**arguments)
     except Exception as e:
         return {"error": str(e)}
+@register_tool(
+    name="get_vegetable_profitability",
+    description="Get profitability metrics for a specific vegetable over a time period. Returns total lots, kg acquired/sold, revenue, costs, profit per kg, margin %, and waste %. Use this to answer 'which vegetables are most profitable?' or 'how profitable is [vegetable]?'",
+    parameters={
+        "type": "object",
+        "properties": {
+            "vegetable_id": {
+                "type": "integer",
+                "description": "The vegetable ID (1-16)"
+            },
+            "days": {
+                "type": "integer",
+                "description": "Number of days to analyze (default 180)"
+            }
+        },
+        "required": ["vegetable_id"]
+    }
+)
+def get_vegetable_profitability(vegetable_id: int, days: int = 180) -> dict:
+    """Get profitability for a vegetable."""
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        service = CostService(db)
+        prof = service.calculate_vegetable_profitability(vegetable_id, days=days)
+        return {
+            "vegetable_id": prof.vegetable_id,
+            "vegetable_name": prof.vegetable_name,
+            "total_lots": prof.total_lots,
+            "total_kg_acquired": float(prof.total_kg_acquired),
+            "total_kg_sold": float(prof.total_kg_sold),
+            "total_revenue": float(prof.total_revenue),
+            "total_cost": float(prof.total_cost),
+            "gross_profit": float(prof.gross_profit),
+            "profit_per_kg": float(prof.profit_per_kg),
+            "margin_pct": float(prof.margin_pct),
+            "waste_pct": float(prof.waste_pct),
+        }
+    finally:
+        db.close()
+
+
+@register_tool(
+    name="get_profitability_ranking",
+    description="Rank all vegetables by profitability (profit per kg). Returns a sorted list of vegetables from most to least profitable. Use for 'which vegetables make the most money?' questions.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "days": {
+                "type": "integer",
+                "description": "Number of days to analyze (default 180)"
+            }
+        },
+        "required": []
+    }
+)
+def get_profitability_ranking(days: int = 180) -> dict:
+    """Get vegetables ranked by profitability."""
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        service = CostService(db)
+        rankings = service.get_profitability_ranking(days=days)
+        return {
+            "days": days,
+            "count": len(rankings),
+            "ranking": [
+                {
+                    "rank": i + 1,
+                    "vegetable_name": r.vegetable_name,
+                    "profit_per_kg": float(r.profit_per_kg),
+                    "total_lots": r.total_lots,
+                    "margin_pct": float(r.margin_pct),
+                }
+                for i, r in enumerate(rankings)
+            ],
+        }
+    finally:
+        db.close()
+
+
+@register_tool(
+    name="get_waste_valuation",
+    description="Calculate the financial impact of waste for a specific lot. Returns waste kg, cost of waste, potential revenue lost, and net loss. Use for 'how much did waste cost us on lot X?' questions.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "lot_code": {
+                "type": "string",
+                "description": "The lot code, e.g., 'L-2026-00070'"
+            }
+        },
+        "required": ["lot_code"]
+    }
+)
+def get_waste_valuation(lot_code: str) -> dict:
+    """Get waste valuation for a lot."""
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        service = CostService(db)
+        lot = db.query(Lot).filter(Lot.lot_code == lot_code).first()
+        if not lot:
+            return {"error": f"Lot {lot_code} not found"}
+        waste = service.calculate_waste_valuation(lot.id)
+        return {
+            "lot_code": waste.lot_code,
+            "vegetable_name": waste.vegetable_name,
+            "waste_kg": float(waste.waste_kg),
+            "damaged_kg": float(waste.damaged_kg),
+            "recycle_kg": float(waste.recycle_kg),
+            "cost_of_waste": float(waste.cost_of_waste),
+            "potential_revenue": float(waste.potential_revenue),
+            "net_loss": float(waste.net_loss),
+        }
+    finally:
+        db.close()
