@@ -1,3 +1,4 @@
+from app.models.location import Location, LocationHistory
 """
 SQLAlchemy Models Package
 =========================
