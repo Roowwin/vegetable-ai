@@ -1,6 +1,4 @@
 """
-from __future__ import annotations
-
 Lot Service
 ===========
 The heart of the business. Tracks lots from acquisition to sale and computes
@@ -9,17 +7,21 @@ the true profit and loss for each lot.
 This is the most important service in the system.
 """
 
+from __future__ import annotations  # Makes all annotations lazy (fixes list[X] issues)
+
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.inventory import Lot, Skid, Asset, Inventory, InventoryTransaction
+from app.models.inventory import Lot, Skid, Asset, Inventory, InventoryTransaction, Vegetable
 from app.models.people import Farmer
 from app.models.quality import Grade, QualityTest, SortResult
 from app.models.sales import SaleItem
 from app.models.costs import CostEntry, LaborRecord
 from app.models.audit import ProcessingEvent
+from app.models.location import Location, LocationHistory
 from app.schemas.lot import (
     LotBase, LotCreate, LotUpdate, LotRead, LotListItem,
     LotProfitLoss, CostBreakdown,
@@ -30,6 +32,32 @@ from app.services.lot_workflow import (
     LotState, validate_transition, get_event_type, get_allowed_transitions,
     InvalidTransitionError, MissingTransitionDataError, LotEventType,
 )
+
+
+# ============================================
+# LOCATION MAPPING CONSTANTS
+# ============================================
+# Maps vegetable categories to their default storage location
+VEGETABLE_STORAGE_LOCATION = {
+    "leafy": "COLD_ROOM_A",
+    "cruciferous": "COLD_ROOM_A",
+    "fruit": "COLD_ROOM_B",
+    "root": "DRY_STORAGE",
+    "legume": "COLD_ROOM_A",
+    "herb": "COLD_ROOM_A",
+    "mushroom": "COLD_ROOM_A",
+}
+
+# Maps quality grades to their display location
+GRADE_SALES_LOCATION = {
+    "A": "DISPLAY_FRONT",
+    "A-": "DISPLAY_FRONT",
+    "B": "SALES_FLOOR",
+    "B-": "SALES_FLOOR",
+    "C": "DISPLAY_FRONT",  # Discount rack
+    "C-": "DISPLAY_FRONT",
+    "RECYCLE": "QUARANTINE",
+}
 
 
 class LotService(BaseService[Lot, LotCreate, LotUpdate]):
@@ -199,7 +227,6 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
 
         vegetable_name = "Unknown"
         if lot.vegetable_id:
-            from app.models.inventory import Vegetable
             veg = self.db.query(Vegetable).filter(Vegetable.id == lot.vegetable_id).first()
             if veg:
                 vegetable_name = veg.name
@@ -248,8 +275,8 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
         3. Apply the transition (update lot.status)
         4. Create a ProcessingEvent record (audit log)
         5. Handle side effects (create inventory, log grade, etc.)
-        6. Commit atomically
-        7. Return the transition details
+        6. Auto-move to appropriate location
+        7. Commit atomically
 
         Raises:
             ValueError: if lot not found or transition invalid
@@ -296,11 +323,14 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
         # Step 5: Handle side effects based on the transition
         self._handle_transition_side_effects(lot, new_state, grade_id, location, employee_id)
 
-        # Step 6: Commit atomically
+        # Step 6: Auto-move to appropriate location (Milestone 7)
+        self._auto_move_on_transition(lot, new_state, grade_id, employee_id)
+
+        # Step 7: Commit atomically
         self.db.commit()
         self.db.refresh(lot)
 
-        # Step 7: Return response
+        # Step 8: Return response
         return LotTransitionResponse(
             lot_code=lot.lot_code,
             previous_status=previous_status,
@@ -347,39 +377,131 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
         elif new_state == LotState.IN_INVENTORY:
             existing_inv = (
                 self.db.query(Inventory)
-                .filter(Inventory.location == f"Lot:{lot.lot_code}")
-                .first()
+                .filter(Inventory.location_id.isnot(None))
+                .all()
             )
-            if not existing_inv:
-                inv_location = location or "Main Shop"
-                inv = Inventory(
-                    asset_id=None,
-                    location=inv_location,
-                    quantity_kg=lot.total_weight_kg,
-                    quantity_units=None,
-                    available_from=datetime.now(timezone.utc),
-                    expires_at=None,
-                    is_available=True,
-                )
-                self.db.add(inv)
-                self.db.flush()
+            # Check if any inventory exists for this lot already
+            from app.models.inventory import Inventory
+            lot_invs = (
+                self.db.query(Inventory)
+                .filter(Inventory.asset.has(skid_id=None))  # No asset = lot-level
+                .all()
+            )
+            # For now, only create if no inventory for this lot exists
+            has_inventory = any(
+                inv.asset and inv.asset.skid and inv.asset.skid.lot_id == lot.id
+                for inv in lot_invs if inv.asset
+            ) if lot_invs else False
 
-                txn = InventoryTransaction(
-                    inventory_id=inv.id,
-                    txn_type="Received",
-                    qty_change_kg=lot.total_weight_kg,
-                    qty_change_units=None,
-                    reference_type="lot_arrival",
-                    reference_id=lot.id,
-                    notes=f"Initial stock from {lot.lot_code}",
-                    created_by=employee_id,
-                )
-                self.db.add(txn)
+            if not has_inventory:
+                inv_location_code = location or "COLD_ROOM_A"
+                target_loc = self.db.query(Location).filter(Location.code == inv_location_code).first()
+                if not target_loc:
+                    target_loc = self.db.query(Location).filter(Location.code == "COLD_ROOM_A").first()
+
+                if target_loc:
+                    inv = Inventory(
+                        asset_id=None,
+                        location_id=target_loc.id,
+                        quantity_kg=lot.total_weight_kg,
+                        quantity_units=None,
+                        available_from=datetime.now(timezone.utc),
+                        expires_at=None,
+                        is_available=True,
+                    )
+                    self.db.add(inv)
+                    self.db.flush()
+
+                    txn = InventoryTransaction(
+                        inventory_id=inv.id,
+                        txn_type="Received",
+                        qty_change_kg=lot.total_weight_kg,
+                        qty_change_units=None,
+                        reference_type="lot_arrival",
+                        reference_id=lot.id,
+                        notes=f"Initial stock from {lot.lot_code}",
+                        created_by=employee_id,
+                    )
+                    self.db.add(txn)
 
         # When PutOnSale: pricing logic (placeholder for now)
         elif new_state == LotState.ON_SALE:
             # Pricing will be handled in Milestone 9 (Sales system)
             pass
+
+    def _auto_move_on_transition(
+        self,
+        lot: Lot,
+        new_state: LotState,
+        grade_id: int | None,
+        employee_id: int,
+    ) -> None:
+        """
+        Auto-move lot/assets to the appropriate location based on the transition.
+        Creates LocationHistory records for audit.
+        """
+        # Determine target location code based on transition
+        target_code = None
+
+        if new_state == LotState.IN_INVENTORY:
+            # Use vegetable's default storage
+            veg = self.db.query(Vegetable).filter(Vegetable.id == lot.vegetable_id).first()
+            if veg and veg.category:
+                target_code = VEGETABLE_STORAGE_LOCATION.get(veg.category, "COLD_ROOM_A")
+        elif new_state == LotState.ON_SALE:
+            # Use grade-based sales location
+            if grade_id:
+                grade = self.db.query(Grade).filter(Grade.id == grade_id).first()
+                if grade:
+                    target_code = GRADE_SALES_LOCATION.get(grade.code, "SALES_FLOOR")
+            else:
+                target_code = "SALES_FLOOR"
+        elif new_state == LotState.GRADED and grade_id:
+            # After grading, move to appropriate storage based on vegetable
+            veg = self.db.query(Vegetable).filter(Vegetable.id == lot.vegetable_id).first()
+            if veg and veg.category:
+                target_code = VEGETABLE_STORAGE_LOCATION.get(veg.category, "COLD_ROOM_A")
+        elif new_state == LotState.SKIDDED:
+            target_code = "SORT_BENCH"
+        elif new_state == LotState.SORTED:
+            target_code = "TEST_BENCH"
+        elif new_state == LotState.TESTED:
+            target_code = "TEST_BENCH"
+
+        if not target_code:
+            return  # No auto-move for this transition
+
+        # Find target location
+        target_location = self.db.query(Location).filter(Location.code == target_code).first()
+        if not target_location:
+            return  # Location doesn't exist
+
+        # Record the move for the lot
+        from_location_id = lot.current_location_id
+        history = LocationHistory(
+            asset_id=None,
+            lot_id=lot.id,
+            from_location_id=from_location_id,
+            to_location_id=target_location.id,
+            moved_by=employee_id,
+            reason=f"Auto-move on transition to {new_state.value}",
+        )
+        self.db.add(history)
+        lot.current_location_id = target_location.id
+
+        # Also move all assets in this lot
+        for skid in lot.skids:
+            for asset in skid.assets:
+                asset_history = LocationHistory(
+                    asset_id=asset.id,
+                    lot_id=None,
+                    from_location_id=asset.current_location_id,
+                    to_location_id=target_location.id,
+                    moved_by=employee_id,
+                    reason=f"Auto-move with lot on {new_state.value}",
+                )
+                self.db.add(asset_history)
+                asset.current_location_id = target_location.id
 
     def get_transition_history(self, lot_code: str) -> "list[dict]":
         """Get the full transition history for a lot (audit log)."""
@@ -419,3 +541,91 @@ class LotService(BaseService[Lot, LotCreate, LotUpdate]):
         if not lot:
             raise ValueError(f"Lot {lot_code} not found")
         return get_allowed_transitions(lot.status)
+
+    def get_location_history(self, lot_code: str, limit: int = 50) -> "list[dict]":
+        """Get the location movement history for a lot."""
+        lot = self.get_by_code(lot_code)
+        if not lot:
+            raise ValueError(f"Lot {lot_code} not found")
+
+        history = (
+            self.db.query(LocationHistory)
+            .filter(LocationHistory.lot_id == lot.id)
+            .order_by(LocationHistory.moved_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+        return [
+            {
+                "from_location_id": h.from_location_id,
+                "to_location_id": h.to_location_id,
+                "moved_at": h.moved_at.isoformat() if h.moved_at else None,
+                "moved_by": h.moved_by,
+                "reason": h.reason,
+                "notes": h.notes,
+            }
+            for h in history
+        ]
+
+    def move_lot(
+        self,
+        lot_code: str,
+        to_location_code: str,
+        employee_id: int,
+        reason: str = "Manual move",
+        notes: str | None = None,
+    ) -> dict:
+        """
+        Manually move a lot to a new location.
+        Creates a LocationHistory record and updates current_location_id.
+        Also moves all assets in the lot.
+        """
+        lot = self.get_by_code(lot_code)
+        if not lot:
+            raise ValueError(f"Lot {lot_code} not found")
+
+        # Find target location
+        target_location = self.db.query(Location).filter(Location.code == to_location_code).first()
+        if not target_location:
+            raise ValueError(f"Location '{to_location_code}' not found")
+
+        from_location_id = lot.current_location_id
+
+        # Record the move for the lot
+        history = LocationHistory(
+            asset_id=None,
+            lot_id=lot.id,
+            from_location_id=from_location_id,
+            to_location_id=target_location.id,
+            moved_by=employee_id,
+            reason=reason,
+            notes=notes,
+        )
+        self.db.add(history)
+        lot.current_location_id = target_location.id
+
+        # Also move all assets
+        for skid in lot.skids:
+            for asset in skid.assets:
+                asset_history = LocationHistory(
+                    asset_id=asset.id,
+                    lot_id=None,
+                    from_location_id=asset.current_location_id,
+                    to_location_id=target_location.id,
+                    moved_by=employee_id,
+                    reason=f"Moved with lot {lot.lot_code}",
+                )
+                self.db.add(asset_history)
+                asset.current_location_id = target_location.id
+
+        self.db.commit()
+
+        return {
+            "lot_code": lot.lot_code,
+            "from_location_id": from_location_id,
+            "to_location": to_location_code,
+            "to_location_id": target_location.id,
+            "moved_by": employee_id,
+            "reason": reason,
+        }
